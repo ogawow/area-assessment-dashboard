@@ -1,0 +1,64 @@
+name: Update dashboard data
+
+on:
+  schedule:
+    # 毎日 19:00 JST (10:00 UTC)。BigQueryのスケジュールクエリ(18:30 JST)の後に実行
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # data/*.json をコミットするため
+  id-token: write   # Workload Identity Federation (キーレス認証) のため
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets configured
+        id: check
+        env:
+          WIF: ${{ secrets.GCP_WIF_PROVIDER }}
+          SA: ${{ secrets.GCP_SA_EMAIL }}
+        run: |
+          if [ -z "$WIF" ] || [ -z "$SA" ]; then
+            echo "GCP secrets not configured yet — skipping (see setup/gcp-setup.sh)"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to Google Cloud (keyless / WIF)
+        if: steps.check.outputs.ready == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up Python
+        if: steps.check.outputs.ready == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        if: steps.check.outputs.ready == 'true'
+        run: pip install --quiet google-cloud-bigquery
+
+      - name: Fetch data from BigQuery and regenerate JSON
+        if: steps.check.outputs.ready == 'true'
+        run: python scripts/update_data.py --project buddica-direct --table rds_postgres_prod.weekly_valuation_summary_api --out data
+
+      - name: Commit and push if changed
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "No data changes"
+          else
+            git commit -m "chore: update dashboard data ($(date -u +%Y-%m-%d))"
+            git push
+          fi
